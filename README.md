@@ -125,7 +125,7 @@ python3 main.py --list-examples
 
 | Option | Meaning / default |
 |---|---|
-| `--mode` | `base`, `improved`, `both` (default), `all`, `bisection`, `false-position` |
+| `--mode` | `base`, `improved`, `both` (default), `all`, `bisection`, `false-position`, `adaptive`, `safeguarded`, `extended` |
 | `--example` | Built-in problem; default `quadratic` |
 | `--function` | Custom expression; requires `--a` and `--b` |
 | `--derivative` | Required for custom `improved`, `both`, and `all` runs |
@@ -202,14 +202,73 @@ print(result.iterations)
 print(result.to_dict())   # Includes the complete iteration history.
 ```
 
+## 7. Extensions: adaptive blending and controlled stress-testing
+
+Beyond reproducing the two papers, this project adds its own extensions
+(see the project proposal, "Beyond Hard Selection: Adaptive Blending of
+Root-Finding Methods"):
+
+- **`--mode adaptive`**: instead of hard-selecting whichever of the
+  bisection midpoint or false-position point has the smaller residual
+  (what `base` does), blend both with residual-adaptive weights and take
+  that blend as the next iterate.
+- **`--mode safeguarded`**: the same idea with a third Newton-Raphson
+  candidate folded in, included only when it is safe and lies inside the
+  current bracket. Requires `--derivative`/`df`, like `improved`.
+- **`--mode extended`** runs both; **`--mode all`** now also includes them
+  alongside the classical and paper methods.
+
+```bash
+python3 main.py --mode extended --example cosine --stop residual --trace
+```
+
+See ALGORITHMS.md for the weighting formula and why both extensions reuse
+the base algorithm's bracket-intersection safety net.
+
+**Proposal-proof charts** (`plot_results.py`): generates PNG charts for
+slides/reports, backing the above with data (this script alone needs
+matplotlib; everything else stays standard-library-only):
+
+```bash
+python3 plot_results.py --output-dir examples/plots
+```
+
+Produces six images: mean iterations and function evaluations per method
+over the 13 benchmark problems, a log-scale residual-decay curve for all
+six methods on one example, stress-test success rate, mean work by
+curvature strength, and a pass/fail heatmap over the full stress-test
+grid. See [examples/plots](examples/plots/) for a saved set.
+
+**Controlled stress-test** (`stress_test.py`): a separate script that
+builds a parameterized family of test functions varying root position,
+concavity direction, and curvature strength, and runs every method on all
+of them under identical settings:
+
+```bash
+python3 stress_test.py --tol 1e-8 --output-dir outputs/stress
+```
+
+It reports success rate, mean iterations, actual `f`/`f'` call counts, a
+combined work metric `Nf + lambda*Nf'` (`--lambda`, default `1.0`), mean
+bracket contraction, and runtime per method, and can save per-case records
+and the summary as JSON/CSV. Classical `false-position` is expected to
+underperform (even fail to converge within the iteration budget) on the
+strongly asymmetric cases in this grid — that is the known pathology the
+base, improved, adaptive, and safeguarded methods are all designed to
+avoid, not a bug in the harness.
+
 ## Project files
 
 ```text
 main.py                    Command-line interface
+stress_test.py             Controlled stress-test harness (Objective 4)
+plot_results.py            PNG charts for slides/reports (needs matplotlib)
 rootfinding/solver.py      Orchestrates validation, iteration, and stopping rules
 rootfinding/classical.py   Bisection and false-position primitives
 rootfinding/base.py        Blended candidate selection (2019 Algorithm 3)
 rootfinding/improved.py    Newton-Raphson refinement (2021 Appendix B)
+rootfinding/adaptive.py    Adaptive/safeguarded blend extensions (project proposal)
+rootfinding/testfunctions.py  Parameterized stress-test function family
 rootfinding/expressions.py  Restricted arithmetic-expression interpreter
 rootfinding/problems.py    Built-in functions, derivatives, and intervals
 tests/                     Algorithm and command-line tests
