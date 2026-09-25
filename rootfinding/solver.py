@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 import math
 from typing import Callable, Optional
 
+from .adaptive import adaptive_step, safeguarded_step
 from .base import candidates_for, select_and_intersect
 from .classical import opposite
 from .improved import newton_step
@@ -32,6 +33,7 @@ class Step:
     a: float
     b: float
     newton_status: str
+    weights: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,19 +63,24 @@ def solve(f: Callable[[float], float], a: float, b: float, *,
           stopping: str = "paper") -> Result:
     """Find one real root in a continuous, sign-changing interval.
 
-    method: base, improved, bisection, or false-position.
-    stopping: paper (base residual / improved residual+step), residual,
-              step-residual, or bracket-residual.
-    An analytic derivative is required for improved. Domain errors in f are
-    reported; unusable Newton steps are skipped without losing the bracket.
+    method: base, improved, bisection, false-position, adaptive, or
+            safeguarded. adaptive and safeguarded are project extensions
+            (see ALGORITHMS.md) that replace base's/improved's hard
+            candidate selection with a residual-weighted blend; safeguarded
+            adds a Newton term to adaptive's midpoint/false-position blend.
+    stopping: paper (base/adaptive residual, improved/safeguarded
+              residual+step), residual, step-residual, or bracket-residual.
+    An analytic derivative is required for improved and safeguarded. Domain
+    errors in f are reported; unusable Newton steps are skipped without
+    losing the bracket.
     Nonconvergence returns a Result with converged=False, never silent success.
     """
-    if method not in {"base", "improved", "bisection", "false-position"}:
+    if method not in {"base", "improved", "bisection", "false-position", "adaptive", "safeguarded"}:
         raise ValueError("Unknown method")
     if stopping not in {"paper", "residual", "step-residual", "bracket-residual"}:
         raise ValueError("Unknown stopping rule")
-    if not callable(f) or (method == "improved" and not callable(df)):
-        raise ValueError("A callable f is required; improved also requires df")
+    if not callable(f) or (method in ("improved", "safeguarded") and not callable(df)):
+        raise ValueError("A callable f is required; improved and safeguarded also require df")
     a, b, tol = float(a), float(b), float(tol)
     if not (math.isfinite(a) and math.isfinite(b) and a < b):
         raise ValueError("Bounds must be finite and satisfy a < b")
@@ -83,7 +90,8 @@ def solve(f: Callable[[float], float], a: float, b: float, *,
         raise ValueError("Tolerance must be finite and positive")
     if isinstance(max_iterations, bool) or not isinstance(max_iterations, int) or max_iterations < 1:
         raise ValueError("max_iterations must be a positive integer")
-    rule = ("step-residual" if method == "improved" else "residual") if stopping == "paper" else stopping
+    rule = (("step-residual" if method in ("improved", "safeguarded") else "residual")
+            if stopping == "paper" else stopping)
     cache = {}
     function_evaluations = 0
     derivative_evaluations = 0
@@ -119,16 +127,28 @@ def solve(f: Callable[[float], float], a: float, b: float, *,
         input_a, input_b = a, b
         newton = None
         newton_status = "not used"
+        weights = ""
 
-        candidates, midpoint, false_position = candidates_for(method, a, b, fa, fb, evaluate)
-        root, fr, selected, a, b, fa, fb = select_and_intersect(a, b, fa, fb, candidates)
-
-        if method == "improved" and fr != 0:
-            # Appendix B uses ONE Newton step starting at the tightened LEFT
-            # endpoint each iteration, not an independent Newton trajectory.
+        if method == "adaptive":
+            (root, fr, selected, a, b, fa, fb, midpoint, false_position,
+             weights) = adaptive_step(a, b, fa, fb, evaluate)
+        elif method == "safeguarded":
+            # Unlike improved's sequential Newton step, all three candidates
+            # here are generated from the SAME current bracket [a, b] and
+            # blended together; see adaptive.py.
             derivative_evaluations += 1
-            a, b, fa, fb, root, fr, selected, newton, newton_status = newton_step(
-                a, b, fa, fb, root, fr, selected, evaluate, df)
+            (root, fr, selected, a, b, fa, fb, midpoint, false_position,
+             newton, newton_status, weights) = safeguarded_step(a, b, fa, fb, evaluate, df)
+        else:
+            candidates, midpoint, false_position = candidates_for(method, a, b, fa, fb, evaluate)
+            root, fr, selected, a, b, fa, fb = select_and_intersect(a, b, fa, fb, candidates)
+
+            if method == "improved" and fr != 0:
+                # Appendix B uses ONE Newton step starting at the tightened LEFT
+                # endpoint each iteration, not an independent Newton trajectory.
+                derivative_evaluations += 1
+                a, b, fa, fb, root, fr, selected, newton, newton_status = newton_step(
+                    a, b, fa, fb, root, fr, selected, evaluate, df)
 
         step_size = abs(root - previous)
         error = abs(fr)
@@ -138,7 +158,7 @@ def solve(f: Callable[[float], float], a: float, b: float, *,
             error += b - a
         history.append(Step(iteration, input_a, input_b, midpoint, false_position,
                             newton, selected, root, fr, abs(fr), step_size, error,
-                            a, b, newton_status))
+                            a, b, newton_status, weights))
         if fr == 0:
             return finish(root, fr, error, True, "exact root (floating-point evaluation)")
         if error < tol:
